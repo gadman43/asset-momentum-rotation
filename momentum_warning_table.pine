@@ -1,0 +1,122 @@
+//@version=5
+indicator("SPMO/MTUM Momentum Warning Table", shorttitle="MomWarn", overlay=true)
+
+// Daily-timeframe early-warning grades (1 = healthy, 5 = severe) for SPMO and MTUM:
+//   1. Relative strength vs benchmark (ratio vs its 20/50 SMA)
+//   2. Trend / drawdown from 52-week high
+//   3. Distribution days (25 sessions) + bearish RSI divergence
+// Composite = average of the six scores, confirmed over `persist` bars.
+
+symA      = input.symbol("AMEX:SPMO", "ETF A")
+symB      = input.symbol("NASDAQ:MTUM", "ETF B")
+symBench  = input.symbol("AMEX:SPY", "Benchmark")
+persist   = input.int(2, "Bars signal must persist", minval=1)
+watchLvl  = input.float(2.0, "Watch level", step=0.1)
+reduceLvl = input.float(3.0, "Reduce 25% level", step=0.1)
+cutLvl    = input.float(4.0, "Reduce 50%+ level", step=0.1)
+tblPos    = input.string("Top Right", "Table position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"])
+
+f_rs(c, bench) =>
+    r   = c / bench
+    m20 = ta.sma(r, 20)
+    m50 = ta.sma(r, 50)
+    newLow = r <= ta.lowest(r, 60)
+    recentLow = ta.barssince(newLow) <= 5
+    int s = 1
+    if r < m20 and r < m50 and m20 < m50 and recentLow
+        s := 5
+    else if r < m20 and r < m50
+        s := 4
+    else if r < m20 or r < m50
+        s := 3
+    else if m20 > m20[1]
+        s := 1
+    else
+        s := 2
+    s
+
+f_trend(c, h) =>
+    hi52  = ta.highest(h, 252)
+    dd    = (hi52 - c) / hi52 * 100
+    s50   = ta.sma(c, 50)
+    s200  = ta.sma(c, 200)
+    int s = 1
+    if dd > 3
+        s := 2
+    if dd > 5 or c < s50
+        s := 3
+    if dd > 8 or s50 < s50[5]
+        s := 4
+    if dd > 12 or c < s200 or s50 < s200
+        s := 5
+    s
+
+f_dist(c, v) =>
+    isDist  = (c / c[1] - 1) <= -0.002 and v > v[1]
+    dist    = math.sum(isDist ? 1 : 0, 25)
+    rsi     = ta.rsi(c, 14)
+    div     = c >= ta.highest(c, 20) * 0.99 and rsi <= ta.highest(rsi, 20) - 5
+    divRecent = ta.barssince(div) <= 20
+    rsiBreak  = rsi < 40 and divRecent
+    int s = 1
+    if dist == 3
+        s := 2
+    if dist == 4 or div
+        s := 3
+    if dist >= 5 and div
+        s := 4
+    if dist >= 6 or rsiBreak
+        s := 5
+    s
+
+[aC, aH, aV] = request.security(symA, "D", [close, high, volume])
+[bC, bH, bV] = request.security(symB, "D", [close, high, volume])
+spy = request.security(symBench, "D", close)
+
+a1 = f_rs(aC, spy)
+a2 = f_trend(aC, aH)
+a3 = f_dist(aC, aV)
+b1 = f_rs(bC, spy)
+b2 = f_trend(bC, bH)
+b3 = f_dist(bC, bV)
+
+composite = (a1 + a2 + a3 + b1 + b2 + b3) / 6.0
+confirmed = ta.lowest(composite, persist)
+
+f_col(s) =>
+    s <= 1 ? color.new(color.green, 20) : s <= 2 ? color.new(color.lime, 30) : s <= 3 ? color.new(color.yellow, 20) : s <= 4 ? color.new(color.orange, 20) : color.new(color.red, 10)
+
+action = confirmed >= cutLvl ? "REDUCE 50%+" : confirmed >= reduceLvl ? "REDUCE ~25%" : confirmed >= watchLvl ? "WATCH" : "FULL EXPOSURE"
+
+pos = switch tblPos
+    "Top Left" => position.top_left
+    "Bottom Right" => position.bottom_right
+    "Bottom Left" => position.bottom_left
+    => position.top_right
+
+var table t = table.new(pos, 3, 6, border_width=1)
+if barstate.islast
+    table.cell(t, 0, 0, "Warning", bgcolor=color.gray, text_color=color.white)
+    table.cell(t, 1, 0, str.tostring(symA), bgcolor=color.gray, text_color=color.white)
+    table.cell(t, 2, 0, str.tostring(symB), bgcolor=color.gray, text_color=color.white)
+    table.cell(t, 0, 1, "Rel. strength vs SPY", text_color=color.white, bgcolor=color.new(color.black, 30))
+    table.cell(t, 1, 1, str.tostring(a1), bgcolor=f_col(a1))
+    table.cell(t, 2, 1, str.tostring(b1), bgcolor=f_col(b1))
+    table.cell(t, 0, 2, "Trend / drawdown", text_color=color.white, bgcolor=color.new(color.black, 30))
+    table.cell(t, 1, 2, str.tostring(a2), bgcolor=f_col(a2))
+    table.cell(t, 2, 2, str.tostring(b2), bgcolor=f_col(b2))
+    table.cell(t, 0, 3, "Distribution / divergence", text_color=color.white, bgcolor=color.new(color.black, 30))
+    table.cell(t, 1, 3, str.tostring(a3), bgcolor=f_col(a3))
+    table.cell(t, 2, 3, str.tostring(b3), bgcolor=f_col(b3))
+    table.cell(t, 0, 4, "Average", text_color=color.white, bgcolor=color.new(color.black, 30))
+    table.cell(t, 1, 4, str.tostring((a1 + a2 + a3) / 3.0, "#.0"), bgcolor=f_col(math.round((a1 + a2 + a3) / 3.0)))
+    table.cell(t, 2, 4, str.tostring((b1 + b2 + b3) / 3.0, "#.0"), bgcolor=f_col(math.round((b1 + b2 + b3) / 3.0)))
+    table.cell(t, 0, 5, "Composite: " + str.tostring(composite, "#.0"), text_color=color.white, bgcolor=color.new(color.black, 30))
+    table.merge_cells(t, 1, 5, 2, 5)
+    table.cell(t, 1, 5, action, bgcolor=f_col(math.round(confirmed)), text_size=size.normal)
+
+plot(composite, "Composite (data window)", display=display.data_window)
+
+alertcondition(ta.crossover(confirmed, watchLvl), "Composite: WATCH", "Momentum warning composite crossed into WATCH")
+alertcondition(ta.crossover(confirmed, reduceLvl), "Composite: REDUCE 25%", "Momentum warning composite: reduce exposure ~25%")
+alertcondition(ta.crossover(confirmed, cutLvl), "Composite: REDUCE 50%+", "Momentum warning composite: reduce exposure 50%+")
